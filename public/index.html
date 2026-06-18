@@ -316,8 +316,9 @@ body{
       </div>
 
       <div class="row">
-        <label>你的昵称</label>
+        <label>你的昵称 <span style="color:#6d6655;font-weight:400">（永久绑定，7 天可改一次）</span></label>
         <input id="myName" class="txt" placeholder="例如：骑士" maxlength="10">
+        <div id="nameHint" style="font-size:11px;color:#9a917f;margin-top:6px;line-height:1.6"></div>
       </div>
 
       <div id="createPane">
@@ -383,6 +384,7 @@ body{
     <span id="sessTime"></span>
     <span class="sp"></span>
     <button class="hbtn" id="openCareer">生涯</button>
+    <button class="hbtn" id="btnRename">改名</button>
     <button class="hbtn" id="openStat">本桌</button>
     <button class="hbtn" id="openFair">公平性</button>
     <button class="hbtn" id="openLog">记录</button>
@@ -633,6 +635,8 @@ function handleMsg(m){
     case "toast": addLog(m.msg,"sys"); break;
     case "career": renderCareer(m); break;
     case "opponents": renderOpp(m); break;
+    case "profile": applyProfile(m); break;
+    case "setname": applySetname(m); break;
     case "error":
       $("connBar").classList.remove("show");
       // 自动重连进无效房间：静默清理，不打扰；手动操作才提示
@@ -1019,6 +1023,62 @@ $("copyLink").onclick=()=>{ const link=location.origin+location.pathname+"?room=
 
 /* 预填上次用过的昵称 */
 (function(){ const n=savedName(); if(n) $("myName").value=n; })();
+
+/* ===== 永久昵称 ===== */
+let profileState=null;   // {exists,name,canChangeNow,waitDays} 或 null(无数据库)
+function queryProfile(){
+  const fn=()=>sendWs({t:"profile",token:myToken()});
+  if(ws&&ws.readyState===1) fn(); else connect(fn);
+}
+function applyProfile(m){
+  if(m.disabled){ profileState=null; $("nameHint").textContent="（未配置数据库，昵称暂不固定，可自由填写）"; return; }
+  profileState=m.profile||{exists:false};
+  if(profileState.exists){
+    $("myName").value=profileState.name;
+    rememberName(profileState.name);
+    if(profileState.canChangeNow){
+      $("myName").readOnly=false;
+      $("nameHint").textContent="这是你的永久昵称，现在可以修改（改后 7 天内不能再改）。";
+    }else{
+      $("myName").readOnly=true;
+      $("nameHint").textContent=`永久昵称已锁定，还需 ${profileState.waitDays} 天才能修改。`;
+    }
+  }else{
+    $("myName").readOnly=false;
+    $("nameHint").textContent="首次填写的昵称将成为你的永久昵称（之后 7 天才能改一次）。";
+  }
+}
+function applySetname(m){
+  if(m.disabled){ alert("未配置数据库，暂不支持固定昵称"); return; }
+  const r=m.result||{};
+  if(r.ok){
+    rememberName(r.name);
+    if($("myName")) $("myName").value=r.name;
+    alert("昵称已修改为：" + r.name + "\n（7 天后才能再次修改）");
+    queryProfile();
+  }else if(r.reason==="cooldown"){
+    alert(`还需等 ${r.waitDays} 天才能再次修改昵称。`);
+  }else if(r.reason==="empty"){
+    alert("昵称不能为空");
+  }else{
+    alert("修改失败，请稍后再试");
+  }
+}
+/* 顶栏改名按钮：弹输入框，提交 setname */
+$("btnRename").onclick=()=>{
+  if(profileState && profileState.exists && !profileState.canChangeNow){
+    alert(`永久昵称已锁定，还需 ${profileState.waitDays} 天才能修改。`); return;
+  }
+  const cur=(profileState&&profileState.name)||savedName()||"";
+  const nn=prompt("修改昵称（永久绑定，7 天只能改一次）：", cur);
+  if(nn==null) return;
+  const v=nn.trim();
+  if(!v){ alert("昵称不能为空"); return; }
+  if(v===cur){ return; }
+  sendWs({t:"setname",token:myToken(),name:v});
+};
+/* 进游戏前先查一次档案，锁定/预填昵称 */
+queryProfile();
 
 /* 进入页面时：URL 带房号 或 本地存了上次房号 → 自动重连，分数照旧 */
 (function(){
