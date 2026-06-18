@@ -44,6 +44,13 @@ async function initDb(){
         a_won BOOLEAN NOT NULL             -- 该手 a 是否赢（相对此对手而言：a_delta>0）
       );
       CREATE INDEX IF NOT EXISTS idx_opp_a_ts ON opponents(a_token, ts);
+
+      CREATE TABLE IF NOT EXISTS players(
+        token TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        name_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
     `);
     ready=true;
     console.log("数据库已连接，生涯统计已启用");
@@ -142,4 +149,61 @@ async function opponentStats(token, range){
   }));
 }
 
-module.exports = { initDb, dbReady, recordHandToDb, careerStats, opponentStats };
+module.exports = { initDb, dbReady, recordHandToDb, careerStats, opponentStats,
+  getProfile, ensureProfile, changeName };
+
+const NAME_COOLDOWN_MS = 7*24*3600*1000;   // 7 天
+
+/* 取玩家档案：{name, nameChangedAt, canChangeAt, exists} */
+async function getProfile(token){
+  if(!ready||!token) return null;
+  try{
+    const q=await pool.query(`SELECT name, name_changed_at FROM players WHERE token=$1`, [token]);
+    if(!q.rows.length) return {exists:false, name:null, canChangeNow:true, waitDays:0};
+    const r=q.rows[0];
+    const changedMs=new Date(r.name_changed_at).getTime();
+    const canAt=changedMs+NAME_COOLDOWN_MS;
+    const now=Date.now();
+    return {
+      exists:true, name:r.name,
+      canChangeNow: now>=canAt,
+      waitDays: now>=canAt?0:Math.ceil((canAt-now)/(24*3600*1000)),
+      canChangeAt: canAt
+    };
+  }catch(e){ return null; }
+}
+
+/* 首次确定昵称（不存在才写入）。返回最终生效的昵称。 */
+async function ensureProfile(token, name){
+  if(!ready||!token) return name;
+  try{
+    const safe=(name||"玩家").slice(0,12);
+    const q=await pool.query(
+      `INSERT INTO players(token,name) VALUES($1,$2)
+       ON CONFLICT(token) DO NOTHING
+       RETURNING name`, [token, safe]);
+    if(q.rows.length) return q.rows[0].name;          // 新建，用传入名
+    const ex=await pool.query(`SELECT name FROM players WHERE token=$1`, [token]);
+    return ex.rows.length?ex.rows[0].name:safe;       // 已存在，返回已绑定的名（永久昵称）
+  }catch(e){ return name; }
+}
+
+/* 改名（7 天一次）。返回 {ok, name, reason, waitDays} */
+async function changeName(token, newName){
+  if(!ready||!token) return {ok:false, reason:"nodb"};
+  const safe=(newName||"").trim().slice(0,12);
+  if(!safe) return {ok:false, reason:"empty"};
+  try{
+    const prof=await getProfile(token);
+    if(!prof || !prof.exists){
+      // 还没有档案 → 直接确立为当前昵称
+      await pool.query(`INSERT INTO players(token,name) VALUES($1,$2)
+        ON CONFLICT(token) DO UPDATE SET name=$2, name_changed_at=now()`, [token, safe]);
+      return {ok:true, name:safe};
+    }
+    if(safe===prof.name) return {ok:true, name:safe};   // 没变，不算改名
+    if(!prof.canChangeNow) return {ok:false, reason:"cooldown", waitDays:prof.waitDays, name:prof.name};
+    await pool.query(`UPDATE players SET name=$2, name_changed_at=now() WHERE token=$1`, [token, safe]);
+    return {ok:true, name:safe};
+  }catch(e){ return {ok:false, reason:"error"}; }
+}

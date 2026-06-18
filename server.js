@@ -563,33 +563,61 @@ wss.on("connection",(ws)=>{
     const room = ws.meta.room ? rooms.get(ws.meta.room) : null;
 
     if(m.t==="create"){
-      const code=newCode();
-      const r=new Room(code,{name:m.name,maxN:m.maxN,buyin:m.buyin,sb:m.sb,dur:m.dur});
-      rooms.set(code,r);
-      const p=r.join(ws,m.me,m.token);
-      if(p){ ws.meta.room=code; ws.meta.id=p.id; ws.meta.token=m.token; }
+      (async()=>{
+        const finalName = await db.ensureProfile(m.token, m.me);   // 永久昵称：已存在则用旧的
+        const code=newCode();
+        const r=new Room(code,{name:m.name,maxN:m.maxN,buyin:m.buyin,sb:m.sb,dur:m.dur});
+        rooms.set(code,r);
+        const p=r.join(ws,finalName,m.token);
+        if(p){ ws.meta.room=code; ws.meta.id=p.id; ws.meta.token=m.token; }
+      })();
       return;
     }
     if(m.t==="join"){
       const r=rooms.get(m.code);
       if(!r){ return send(ws,{t:"error",msg:"房间不存在或已解散"}); }
-      const p=r.join(ws,m.me,m.token);
-      if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; }
+      (async()=>{
+        const finalName = await db.ensureProfile(m.token, m.me);
+        const p=r.join(ws,finalName,m.token);
+        if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; }
+      })();
       return;
     }
     if(m.t==="reconnect"){
       const r=rooms.get(m.code);
-      // 用 token 找回座位（断线/刷新后回来，分数照旧）
       if(r){
         const exist = m.token ? r.seats.find(p=>p&&p.token===m.token) : null;
         if(exist){ exist.ws=ws; exist.connected=true; if(exist.status==="掉线")exist.status="";
           ws.meta.room=m.code; ws.meta.id=exist.id; ws.meta.token=m.token;
           send(ws,{t:"joined",youId:exist.id,room:r.meta()}); r.broadcastState(); return; }
-        // token 不在座但账本里有记录 → 当作重新加入并恢复分数
-        const p=r.join(ws,m.me,m.token);
-        if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; return; }
+        (async()=>{
+          const finalName = await db.ensureProfile(m.token, m.me);
+          const p=r.join(ws,finalName,m.token);
+          if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; }
+          else send(ws,{t:"error",msg:"重连失败，请重新加入"});
+        })();
+        return;
       }
       send(ws,{t:"error",msg:"重连失败，请重新加入"});
+      return;
+    }
+    // 查询档案（昵称 + 能否改名 + 还需等几天）
+    if(m.t==="profile"){
+      const token=m.token||ws.meta.token;
+      if(!db.dbReady()){ return send(ws,{t:"profile",disabled:true}); }
+      (async()=>{ const p=await db.getProfile(token); send(ws,{t:"profile",profile:p}); })();
+      return;
+    }
+    // 改名（7 天一次）
+    if(m.t==="setname"){
+      const token=m.token||ws.meta.token;
+      if(!db.dbReady()){ return send(ws,{t:"setname",disabled:true}); }
+      (async()=>{
+        const res=await db.changeName(token, m.name);
+        send(ws,{t:"setname",result:res});
+        // 改名成功且在房间内 → 同步更新座位显示名
+        if(res.ok && room){ const p=room.byId(ws.meta.id); if(p){ p.name=res.name; room.broadcastState(); } }
+      })();
       return;
     }
     // 生涯 / 对手查询：可在大厅或房间内调用，按 token 查
