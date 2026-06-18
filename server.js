@@ -11,6 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { WebSocketServer } = require("ws");
+const db = require("./db.js");
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC = path.join(__dirname, "public");
@@ -131,6 +132,8 @@ class Room {
     this.inHand = false;
     this.sessionRemain = this.dur ? this.dur*60 : -1;
     this.lastActive = Date.now();
+    this.ledger = {};      // token -> {name,chips,buyin}  退出后保存分数，重进恢复
+    this.hostToken = null; // 房主（第一个进来的人）
     this.startSessionClock();
   }
   occupied(){ return this.seats.filter(Boolean); }
@@ -153,36 +156,50 @@ class Room {
   broadcast(obj){ for(const p of this.occupied()) send(p.ws,obj); }
 
   /* ---- 加入 / 离座 ---- */
-  join(ws, name){
-    // 已在房间（重连）？按名字找空位或新位
+  join(ws, name, token){
+    // 同一 token 已在座（同一人开了两个页面）→ 当作重连
+    const existing = token ? this.seats.find(p=>p&&p.token===token) : null;
+    if(existing){ existing.ws=ws; existing.connected=true; if(existing.status==="掉线")existing.status="";
+      send(ws,{t:"joined",youId:existing.id,room:this.meta()}); this.broadcastState(); return existing; }
     const seat=this.freeSeat();
     if(seat<0){ send(ws,{t:"error",msg:"房间已满"}); return null; }
     const id=crypto.randomBytes(4).toString("hex");
-    const p={id,name:name||("玩家"+(seat+1)),ws,seat,
-      chips:this.buyin,buyin:this.buyin,
-      hole:[],bet:0,contrib:0,folded:false,allIn:false,revealed:false,foldShow:false,status:"",
+    // 从账本恢复分数（退出再进，分数照旧）
+    const saved = token && this.ledger[token];
+    const p={id,token:token||id,name:(saved&&saved.name)||name||("玩家"+(seat+1)),ws,seat,
+      chips: saved?saved.chips:this.buyin,
+      buyin: saved?saved.buyin:this.buyin,
+      hole:[],bet:0,contrib:0,folded:true,allIn:false,revealed:false,foldShow:false,status:"",
       sittingOut:false,connected:true};
     this.seats[seat]=p;
+    if(!this.hostToken) this.hostToken=p.token;   // 第一个进来的人是房主
     this.lastActive=Date.now();
     send(ws,{t:"joined",youId:id,room:this.meta()});
-    this.log(`${p.name} 加入了房间`,"sys");
+    this.log(saved?`${p.name} 回到房间（分数已恢复：${p.chips}）`:`${p.name} 加入了房间`,"sys");
     this.broadcastState();
-    // 满足开局条件且当前没在牌局中，自动起一局
-    this.maybeStart();
+    // 不再自动开局：等房主点「开始」。若正在进行中则下一手自动带上新玩家。
     return p;
   }
+  saveToLedger(p){ if(!p) return; this.ledger[p.token]={name:p.name,chips:p.chips,buyin:p.buyin}; }
   leave(id){
     const p=this.byId(id); if(!p) return;
     if(this.inHand && !p.folded){ p.folded=true; p.status="离座弃牌"; }
-    this.log(`${p.name} 离开了房间`,"sys");
+    this.saveToLedger(p);                       // 保存分数，下次回来恢复
+    this.log(`${p.name} 离开了房间（分数已保存）`,"sys");
     this.seats[p.seat]=null;
-    if(this.occupied().length===0){ this.destroy(); return; }
+    // 房主走了，顺位给下一个在座的人
+    if(this.hostToken===p.token){ const n=this.occupied()[0]; this.hostToken=n?n.token:null; }
+    if(this.occupied().length===0){ /* 留空房保存账本，10 分钟后再清 */ this.scheduleEmptyCleanup(); }
     this.broadcastState();
+  }
+  scheduleEmptyCleanup(){
+    clearTimeout(this._emptyTo);
+    this._emptyTo=setTimeout(()=>{ if(this.occupied().length===0) this.destroy(); }, 10*60*1000);
   }
   disconnect(id){
     const p=this.byId(id); if(!p) return;
     p.connected=false; p.status="掉线";
-    // 牌局中掉线者，到他行动时会被自动处理；保留座位 60 秒等待重连
+    this.saveToLedger(p);
     this.broadcastState();
     setTimeout(()=>{ const q=this.byId(id); if(q&&!q.connected) this.leave(id); },60000);
   }
@@ -205,14 +222,20 @@ class Room {
     this.broadcastState();
   }
 
-  /* ---- 自动开局 ---- */
-  maybeStart(){
+  /* ---- 开局 ---- */
+  // 房主点「开始游戏」才起第一手
+  startByHost(token){
+    if(token!==this.hostToken) return;            // 只有房主能开
     if(this.inHand) return;
     if(this.sessionRemain===0){ this.endSession(); return; }
     const ready=this.occupied().filter(p=>p.chips>0);
-    if(ready.length>=2){
-      this._nextTo=setTimeout(()=>this.startHand(), 1500);
-    }
+    if(ready.length>=2) this.startHand();
+    else this.broadcast({t:"toast",msg:"至少需要 2 人才能开始"});
+  }
+  // 手与手之间是否还能继续（用于自动开下一手）
+  canContinue(){
+    if(this.sessionRemain===0) return false;
+    return this.occupied().filter(p=>p.chips>0).length>=2;
   }
 
   /* ---- 一手 ---- */
@@ -446,14 +469,20 @@ class Room {
     this.inHand=false;
     // 公开本局牌序，供验证
     this.reveal={salt:this.salt,commit:this.commit,order:this.orderStr};
-    // 历史
+    // 历史（房间内显示用）
     const deltas=this.occupied().map(p=>({name:p.name,d:p.chips-(this.snap[p.id]??p.chips)}));
     this.history.unshift({h:this.handNo,desc,deltas});
     if(this.history.length>200) this.history.length=200;
+    // 写入数据库做长期生涯/对手统计（按 token）
+    const dbPlayers=this.occupied().map(p=>({token:p.token,name:p.name,delta:p.chips-(this.snap[p.id]??p.chips)}));
+    db.recordHandToDb(this.code, this.handNo, dbPlayers).catch(()=>{});
+    // 把当前分数写入账本，刷新/掉线都不丢
+    for(const p of this.occupied()) this.saveToLedger(p);
     this.broadcastState();
     this.broadcast({t:"handEnd",banner,reveal:this.reveal});
     // 整局时间到 → 总结算；否则 5 秒后自动开下一局
     if(this.sessionRemain===0){ setTimeout(()=>this.endSession(),1200); return; }
+    if(!this.canContinue()){ this.broadcast({t:"waiting"}); this.broadcastState(); return; }
     let c=5;
     this.broadcast({t:"nextIn",sec:c});
     this._nextTo=setInterval(()=>{
@@ -464,8 +493,7 @@ class Room {
   }
   maybeStartNow(){
     if(this.sessionRemain===0){ this.endSession(); return; }
-    const ready=this.occupied().filter(p=>p.chips>0);
-    if(ready.length>=2) this.startHand();
+    if(this.canContinue()) this.startHand();
     else { this.broadcast({t:"waiting"}); this.broadcastState(); }
   }
   forceNext(){ clearInterval(this._nextTo); this.maybeStartNow(); }
@@ -486,6 +514,7 @@ class Room {
 
   /* ---- 发给客户端的状态：底牌只发给本人 ---- */
   stateFor(viewerId){
+    const viewer=this.byId(viewerId);
     const players=this.seats.map((p,seat)=>{
       if(!p) return {seat,empty:true};
       const showHole = (p.id===viewerId) || p.revealed;
@@ -493,10 +522,11 @@ class Room {
         seat, id:p.id, name:p.name, chips:p.chips, buyin:p.buyin,
         bet:p.bet, status:p.status, folded:p.folded, allIn:p.allIn,
         revealed:p.revealed, foldShow:p.foldShow, connected:p.connected,
-        isYou:p.id===viewerId,
+        isYou:p.id===viewerId, isHost:(p.token===this.hostToken),
         hole: p.hole.length ? (showHole ? p.hole.map(c=>({r:c.r,s:c.s})) : p.hole.map(()=>null)) : []
       };
     });
+    const readyCount=this.occupied().filter(p=>p.chips>0).length;
     return {
       t:"state",
       code:this.code, name:this.name, sb:this.sb, bb:this.bb, buyin:this.buyin,
@@ -511,6 +541,9 @@ class Room {
       commit:this.commit||"",
       shuffleLog:this.shuffleLog||[],
       history:this.history,
+      readyCount,
+      iAmHost: !!(viewer && viewer.token===this.hostToken),
+      canStart: !this.inHand && readyCount>=2,   // 房主可点开始
       players
     };
   }
@@ -533,21 +566,44 @@ wss.on("connection",(ws)=>{
       const code=newCode();
       const r=new Room(code,{name:m.name,maxN:m.maxN,buyin:m.buyin,sb:m.sb,dur:m.dur});
       rooms.set(code,r);
-      const p=r.join(ws,m.me);
-      if(p){ ws.meta.room=code; ws.meta.id=p.id; }
+      const p=r.join(ws,m.me,m.token);
+      if(p){ ws.meta.room=code; ws.meta.id=p.id; ws.meta.token=m.token; }
       return;
     }
     if(m.t==="join"){
       const r=rooms.get(m.code);
       if(!r){ return send(ws,{t:"error",msg:"房间不存在或已解散"}); }
-      const p=r.join(ws,m.me);
-      if(p){ ws.meta.room=m.code; ws.meta.id=p.id; }
+      const p=r.join(ws,m.me,m.token);
+      if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; }
       return;
     }
     if(m.t==="reconnect"){
       const r=rooms.get(m.code);
-      if(r&&r.reconnect(m.id,ws)){ ws.meta.room=m.code; ws.meta.id=m.id; }
-      else send(ws,{t:"error",msg:"重连失败，请重新加入"});
+      // 用 token 找回座位（断线/刷新后回来，分数照旧）
+      if(r){
+        const exist = m.token ? r.seats.find(p=>p&&p.token===m.token) : null;
+        if(exist){ exist.ws=ws; exist.connected=true; if(exist.status==="掉线")exist.status="";
+          ws.meta.room=m.code; ws.meta.id=exist.id; ws.meta.token=m.token;
+          send(ws,{t:"joined",youId:exist.id,room:r.meta()}); r.broadcastState(); return; }
+        // token 不在座但账本里有记录 → 当作重新加入并恢复分数
+        const p=r.join(ws,m.me,m.token);
+        if(p){ ws.meta.room=m.code; ws.meta.id=p.id; ws.meta.token=m.token; return; }
+      }
+      send(ws,{t:"error",msg:"重连失败，请重新加入"});
+      return;
+    }
+    // 生涯 / 对手查询：可在大厅或房间内调用，按 token 查
+    if(m.t==="career" || m.t==="opponents"){
+      const token=m.token||ws.meta.token;
+      const range=m.range||"90";
+      if(!token){ return; }
+      if(!db.dbReady()){ return send(ws,{t:m.t,range,disabled:true}); }
+      (async()=>{
+        try{
+          if(m.t==="career"){ const data=await db.careerStats(token,range); send(ws,{t:"career",range,data}); }
+          else { const list=await db.opponentStats(token,range); send(ws,{t:"opponents",range,list}); }
+        }catch(e){ send(ws,{t:m.t,range,disabled:true}); }
+      })();
       return;
     }
     if(!room) return;
@@ -555,6 +611,7 @@ wss.on("connection",(ws)=>{
       case "action": room.applyAction(ws.meta.id,m.act); break;
       case "extend": room.extend(ws.meta.id); break;
       case "addon":  room.addOn(ws.meta.id); break;
+      case "start":  room.startByHost(ws.meta.token); break;
       case "next":   room.forceNext(); break;
       case "restart":room.restartSession(); break;
       case "leave":  room.leave(ws.meta.id); ws.meta.room=null; break;
@@ -566,6 +623,7 @@ wss.on("connection",(ws)=>{
   });
 });
 
+db.initDb().catch(e=>console.error("initDb error",e.message));
 server.listen(PORT,()=>console.log("公平德州联机服务已启动，端口 "+PORT));
 
 /* 导出供本地测试 */
