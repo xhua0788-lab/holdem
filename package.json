@@ -1,7 +1,7 @@
 {
   "name": "fair-holdem",
   "version": "1.0.0",
-  "description": "Fair Texas Holdem online room",
+  "description": "公平德州扑克 · 朋友联机局（真人对战，服务器洗牌发牌，可验证公平）",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
