@@ -275,6 +275,28 @@ body{
 #shareRow{display:flex;gap:8px;margin-top:8px}
 #shareRow button{flex:1;padding:9px;border-radius:8px;border:1px solid rgba(255,255,255,.25);
   background:rgba(0,0,0,.25);color:var(--gold);font-size:12px;cursor:pointer}
+.ctabs{display:flex;gap:8px;margin-bottom:12px}
+.ctabs .ct{flex:1;padding:9px 0;border-radius:9px;border:1px solid #3d362a;background:#1c1914;
+  color:#cfc6b2;font-size:13px;cursor:pointer}
+.ctabs .ct.on{background:var(--gold);color:#1a1a1a;font-weight:800;border-color:var(--gold)}
+.rtabs{display:flex;gap:6px;margin-bottom:14px}
+.rtabs .rt{flex:1;padding:6px 0;border-radius:7px;border:1px solid #3d362a;background:transparent;
+  color:#9a917f;font-size:12px;cursor:pointer}
+.rtabs .rt.on{background:#2a251c;color:var(--gold);border-color:#5a4628}
+.chead{font-size:13px;color:#cfc6b2;line-height:1.9;border-bottom:1px solid #26221a;padding-bottom:10px}
+.chead .big{font-size:30px;font-weight:800;display:block;margin-bottom:2px}
+.chead .big.pos{color:#ff7a5c}.chead .big.neg{color:#5fcf94}
+.chead .sub{font-size:11px;color:#6d6655}
+#careerCurve{height:70px;margin-top:10px}
+.crow{display:flex;align-items:center;gap:8px;padding:9px 2px;border-bottom:1px dashed #26221a;font-size:12px}
+.crow .nm{flex:1;color:#eaf5ee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.crow .vs{color:#9a917f;font-size:11px;min-width:78px;text-align:right}
+.crow .net{min-width:62px;text-align:right;font-weight:700}
+.crow .net.pos{color:#ff7a5c}.crow .net.neg{color:#5fcf94}
+.opp-th{display:flex;gap:8px;font-size:10px;color:#6d6655;padding:0 2px 6px;border-bottom:1px solid #26221a;letter-spacing:1px}
+.opp-th .nm{flex:1}.opp-th .vs{min-width:78px;text-align:right}.opp-th .net{min-width:62px;text-align:right}
+.cdis{font-size:12px;color:#9a917f;line-height:1.9;background:#1c1914;border:1px solid #3d362a;
+  border-radius:9px;padding:12px}
 </style>
 
 </head>
@@ -360,7 +382,8 @@ body{
     <span id="roomTag">朋友局</span>
     <span id="sessTime"></span>
     <span class="sp"></span>
-    <button class="hbtn" id="openStat">战绩</button>
+    <button class="hbtn" id="openCareer">生涯</button>
+    <button class="hbtn" id="openStat">本桌</button>
     <button class="hbtn" id="openFair">公平性</button>
     <button class="hbtn" id="openLog">记录</button>
     <button class="hbtn" id="btnLeave">退出</button>
@@ -408,6 +431,7 @@ body{
   </div>
 
   <div id="endBtns">
+    <button class="pbtn" id="bStart" style="display:none">开始游戏</button>
     <button class="pbtn" id="bNext" style="display:none">下一局</button>
     <button class="pbtn" id="bAgain" style="display:none">再来一局</button>
     <button class="pbtn" id="bAddOn" style="display:none">补码</button>
@@ -445,10 +469,38 @@ body{
 <div class="drawer" id="statDrawer">
   <div class="inner">
     <button class="x" data-close>×</button>
-    <h2 id="statTitle">战绩</h2>
+    <h2 id="statTitle">本桌战绩</h2>
     <div id="statTable"></div>
     <h2>每局历史</h2>
     <div id="histFeed"><p style="color:#6d6655;font-size:11px">暂无记录</p></div>
+  </div>
+</div>
+
+<div class="drawer" id="careerDrawer">
+  <div class="inner">
+    <button class="x" data-close>×</button>
+    <h2>生涯战绩</h2>
+    <div id="careerTabs" class="ctabs">
+      <button class="ct on" data-ct="career">牌局盈亏</button>
+      <button class="ct" data-ct="opp">对手胜负</button>
+    </div>
+    <div id="rangeTabs" class="rtabs">
+      <button class="rt" data-r="today">今日</button>
+      <button class="rt" data-r="7">7天</button>
+      <button class="rt" data-r="30">30天</button>
+      <button class="rt on" data-r="90">90天</button>
+    </div>
+    <div id="careerBody">
+      <div id="careerPane">
+        <div id="careerHead" class="chead">—</div>
+        <div id="careerCurve"></div>
+        <h2 style="margin-top:14px">历史牌局</h2>
+        <div id="careerList"><p style="color:#6d6655;font-size:11px">加载中…</p></div>
+      </div>
+      <div id="oppPane" style="display:none">
+        <div id="oppList"><p style="color:#6d6655;font-size:11px">加载中…</p></div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -512,7 +564,20 @@ const AVBG=["linear-gradient(160deg,#e8a33d,#a35f12)","linear-gradient(160deg,#6
 
 /* ============ WebSocket 客户端 ============ */
 let ws=null, ST=null, YOU=null, MAXN=9, mySeat=0;
-let reconnInfo=null;     // {code,id}
+let reconnInfo=null;     // {code}
+
+/* 持久身份：同一浏览器始终用同一个 token，服务器据此认人、恢复分数 */
+function myToken(){
+  let t=null;
+  try{ t=localStorage.getItem("fp_token"); }catch(e){}
+  if(!t){ t=(Date.now().toString(36)+Math.random().toString(36).slice(2,10)); try{localStorage.setItem("fp_token",t);}catch(e){} }
+  return t;
+}
+function saveLastRoom(code){ try{ localStorage.setItem("fp_lastRoom",code); }catch(e){} }
+function lastRoom(){ try{ return localStorage.getItem("fp_lastRoom"); }catch(e){ return null; } }
+function clearLastRoom(){ try{ localStorage.removeItem("fp_lastRoom"); }catch(e){} }
+function savedName(){ try{ return localStorage.getItem("fp_name")||""; }catch(e){ return ""; } }
+function rememberName(n){ try{ localStorage.setItem("fp_name",n); }catch(e){} }
 
 function wsUrl(){
   const proto=location.protocol==="https:"?"wss:":"ws:";
@@ -528,7 +593,7 @@ function connect(onOpen){
     $("connBar").classList.add("show");
     $("connBar").textContent="与服务器断开，正在重连…";
     setTimeout(()=>connect(()=>{
-      if(reconnInfo) ws.send(JSON.stringify({t:"reconnect",code:reconnInfo.code,id:reconnInfo.id}));
+      if(reconnInfo) ws.send(JSON.stringify({t:"reconnect",code:reconnInfo.code,token:myToken(),me:savedName()}));
     }),2000);
   };
   ws.onerror=()=>{};
@@ -538,8 +603,9 @@ function sendWs(obj){ if(ws&&ws.readyState===1) ws.send(JSON.stringify(obj)); }
 function handleMsg(m){
   switch(m.t){
     case "joined":
-      YOU=m.youId; reconnInfo={code:m.room.code,id:m.youId};
+      YOU=m.youId; reconnInfo={code:m.room.code}; autoReconnecting=false;
       MAXN=m.room.maxN;
+      saveLastRoom(m.room.code);
       $("setup").style.display="none";
       $("roomTag").textContent=`${m.room.name} · 房号 ${m.room.code}`;
       buildSeats();
@@ -565,9 +631,17 @@ function handleMsg(m){
       $("bAgain").style.display="";
       break;
     case "toast": addLog(m.msg,"sys"); break;
-    case "error": alert(m.msg); $("connBar").classList.remove("show"); break;
+    case "career": renderCareer(m); break;
+    case "opponents": renderOpp(m); break;
+    case "error":
+      $("connBar").classList.remove("show");
+      // 自动重连进无效房间：静默清理，不打扰；手动操作才提示
+      if(autoReconnecting){ autoReconnecting=false; clearLastRoom(); $("setup").style.display="flex"; }
+      else alert(m.msg);
+      break;
   }
 }
+let autoReconnecting=false;
 
 /* ============ 渲染 ============ */
 function seatToScreen(seat){
@@ -605,6 +679,11 @@ function render(){
   const showWait = !ST.inHand && occ<2;
   $("waitOverlay").classList.toggle("show",showWait);
   if(showWait){ $("waitCode").textContent=ST.code; }
+
+  // 房主开始按钮：未开局、人够、我是房主时显示
+  const canHostStart = ST.iAmHost && ST.canStart && !ST.inHand;
+  $("bStart").style.display = canHostStart ? "" : "none";
+  if(canHostStart) $("bStart").textContent=`开始游戏 (${ST.readyCount}人)`;
 
   // 对手座位
   const pos=POS[MAXN]||POS[9];
@@ -780,9 +859,10 @@ $("bCall").onclick=()=>{
 function hideActionsLocal(){ ["bFold","bCall","bRaise"].forEach(id=>$(id).classList.remove("show")); $("bubbleWrap").style.display="none"; $("sliderWrap").style.display="none"; }
 $("bDelay").onclick=()=>sendWs({t:"extend"});
 $("bAddOn").onclick=()=>sendWs({t:"addon"});
+$("bStart").onclick=()=>{ $("bStart").style.display="none"; sendWs({t:"start"}); };
 $("bNext").onclick=()=>sendWs({t:"next"});
 $("bAgain").onclick=()=>{ $("bAgain").style.display="none"; $("banner").style.display="none"; sendWs({t:"restart"}); };
-$("btnLeave").onclick=()=>{ if(confirm("确定退出房间？")){ sendWs({t:"leave"}); location.href=location.pathname; } };
+$("btnLeave").onclick=()=>{ if(confirm("确定退出房间？分数会保存，下次进同一房号可恢复。")){ sendWs({t:"leave"}); clearLastRoom(); location.href=location.pathname; } };
 
 function minRaiseTo(me){ return Math.min(ST.currentBet+ST.lastRaise, me.bet+me.chips); }
 function potNow(){ return (ST.pot||0)+ST.players.reduce((a,p)=>a+((p&&p.bet)||0),0); }
@@ -828,6 +908,80 @@ $("openFair").onclick=()=>$("fairDrawer").style.display="block";
 $("openLog").onclick=()=>$("logDrawer").style.display="block";
 $("openStat").onclick=()=>{ renderStats(); $("statDrawer").style.display="block"; };
 $("infoLine").onclick=()=>$("fairDrawer").style.display="block";
+
+/* ===== 生涯 / 对手 ===== */
+let careerTab="career", careerRange="90";
+$("openCareer").onclick=()=>{ $("careerDrawer").style.display="block"; queryCareer(); };
+document.querySelectorAll("#careerTabs .ct").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("#careerTabs .ct").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  careerTab=b.dataset.ct;
+  $("careerPane").style.display=careerTab==="career"?"":"none";
+  $("oppPane").style.display=careerTab==="opp"?"":"none";
+  queryCareer();
+});
+document.querySelectorAll("#rangeTabs .rt").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("#rangeTabs .rt").forEach(x=>x.classList.remove("on")); b.classList.add("on");
+  careerRange=b.dataset.r; queryCareer();
+});
+function queryCareer(){
+  const token=myToken();
+  if(!(ws&&ws.readyState===1)){ connect(()=>sendWs({t:careerTab==="opp"?"opponents":"career",token,range:careerRange})); return; }
+  sendWs({t:careerTab==="opp"?"opponents":"career",token,range:careerRange});
+}
+function renderCareer(m){
+  if(m.disabled){ $("careerHead").innerHTML=''; $("careerCurve").innerHTML='';
+    $("careerList").innerHTML='<div class="cdis">生涯统计尚未启用：需要房主在服务器配置数据库（DATABASE_URL）后才会记录长期战绩。配置完成后这里会自动显示今日/7天/30天/90天的盈亏。</div>';
+    return; }
+  const d=m.data||{net:0,hands:0,wins:0,losses:0,curve:[],recent:[]};
+  const cls=d.net>=0?"pos":"neg";
+  $("careerHead").innerHTML=
+    `<span class="big ${cls}">${d.net>=0?"+":""}${d.net}</span>`+
+    `<span class="sub">${d.hands} 手 · 胜 ${d.wins} / 负 ${d.losses}${d.hands?(" · 胜率 "+Math.round(d.wins/d.hands*100)+"%"):""}</span>`;
+  $("careerCurve").innerHTML=sparkline(d.curve);
+  const list=$("careerList");
+  if(!d.recent.length){ list.innerHTML='<p style="color:#6d6655;font-size:11px">该时间段暂无记录</p>'; return; }
+  list.innerHTML="";
+  for(const r of d.recent){
+    const c=r.delta>=0?"pos":"neg";
+    const row=document.createElement("div"); row.className="crow";
+    row.innerHTML=`<span class="nm">房号 ${r.code} · 第 ${r.hand} 手</span>
+      <span class="vs">${r.t}</span>
+      <span class="net ${c}">${r.delta>=0?"+":""}${r.delta}</span>`;
+    list.appendChild(row);
+  }
+}
+function renderOpp(m){
+  const list=$("oppList");
+  if(m.disabled){ list.innerHTML='<div class="cdis">对手胜负统计尚未启用：需要在服务器配置数据库（DATABASE_URL）后记录。</div>'; return; }
+  const arr=m.list||[];
+  if(!arr.length){ list.innerHTML='<p style="color:#6d6655;font-size:11px">该时间段暂无对手记录</p>'; return; }
+  list.innerHTML='<div class="opp-th"><span class="nm">对手</span><span class="vs">手数 · 胜/负</span><span class="net">盈亏</span></div>';
+  for(const o of arr){
+    const c=o.net>=0?"pos":"neg";
+    const row=document.createElement("div"); row.className="crow";
+    row.innerHTML=`<span class="nm">${o.name}</span>
+      <span class="vs">${o.hands} · ${o.wins}/${o.losses}</span>
+      <span class="net ${c}">${o.net>=0?"+":""}${o.net}</span>`;
+    list.appendChild(row);
+  }
+}
+/* 极简盈亏曲线（累计） */
+function sparkline(curve){
+  if(!curve||!curve.length) return '<div style="font-size:11px;color:#6d6655">暂无曲线数据</div>';
+  let acc=0; const pts=curve.map(c=>{ acc+=c.net; return acc; });
+  const W=320,H=64,pad=4;
+  const min=Math.min(0,...pts), max=Math.max(0,...pts), span=(max-min)||1;
+  const x=i=>pad+(W-2*pad)*(pts.length<=1?0.5:i/(pts.length-1));
+  const y=v=>pad+(H-2*pad)*(1-(v-min)/span);
+  const dpath=pts.map((v,i)=>(i?"L":"M")+x(i).toFixed(1)+" "+y(v).toFixed(1)).join(" ");
+  const last=pts[pts.length-1];
+  const col=last>=0?"#ff7a5c":"#5fcf94";
+  const zeroY=y(0).toFixed(1);
+  return `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">
+    <line x1="${pad}" y1="${zeroY}" x2="${W-pad}" y2="${zeroY}" stroke="#3a3326" stroke-width="1" stroke-dasharray="3 3"/>
+    <path d="${dpath}" fill="none" stroke="${col}" stroke-width="2" stroke-linejoin="round"/>
+  </svg>`;
+}
 document.querySelectorAll("[data-close]").forEach(b=>b.onclick=e=>e.target.closest(".drawer").style.display="none");
 document.querySelectorAll(".drawer").forEach(d=>d.onclick=e=>{ if(e.target===d) d.style.display="none"; });
 
@@ -842,16 +996,16 @@ document.querySelectorAll("#joinTabs .t").forEach(t=>t.onclick=()=>{
 });
 
 $("createBtn").onclick=()=>{
-  const me=$("myName").value.trim()||"玩家";
-  const payload={t:"create",me,name:$("roomName").value.trim()||"朋友局",
+  const me=$("myName").value.trim()||"玩家"; rememberName(me);
+  const payload={t:"create",me,token:myToken(),name:$("roomName").value.trim()||"朋友局",
     maxN:segVal("segN"),buyin:segVal("segC"),sb:segVal("segB"),dur:segVal("segT")};
   connectThen(()=>sendWs(payload));
 };
 $("joinBtn").onclick=()=>{
   const code=$("joinCode").value.trim();
   if(!/^\d{6}$/.test(code)){ alert("请输入 6 位房间号"); return; }
-  const me=$("myName").value.trim()||"玩家";
-  connectThen(()=>sendWs({t:"join",code,me}));
+  const me=$("myName").value.trim()||"玩家"; rememberName(me);
+  connectThen(()=>sendWs({t:"join",code,me,token:myToken()}));
 };
 function connectThen(fn){
   if(ws&&ws.readyState===1){ fn(); return; }
@@ -863,12 +1017,19 @@ $("copyCode").onclick=()=>{ navigator.clipboard&&navigator.clipboard.writeText(S
 $("copyLink").onclick=()=>{ const link=location.origin+location.pathname+"?room="+ST.code;
   navigator.clipboard&&navigator.clipboard.writeText(link); $("copyLink").textContent="已复制"; setTimeout(()=>$("copyLink").textContent="复制邀请链接",1500); };
 
-/* 链接带房号则自动填入加入框 */
+/* 预填上次用过的昵称 */
+(function(){ const n=savedName(); if(n) $("myName").value=n; })();
+
+/* 进入页面时：URL 带房号 或 本地存了上次房号 → 自动重连，分数照旧 */
 (function(){
   const q=new URLSearchParams(location.search).get("room");
-  if(q&&/^\d{6}$/.test(q)){
+  const code=(q&&/^\d{6}$/.test(q))?q:(lastRoom()||null);
+  if(code){
     document.querySelector('#joinTabs .t[data-tab="join"]').click();
-    $("joinCode").value=q;
+    $("joinCode").value=code;
+    // 自动尝试回到该房间（同 token 服务器会认出你、恢复分数）
+    autoReconnecting=true;
+    connectThen(()=>sendWs({t:"reconnect",code,token:myToken(),me:savedName()||"玩家"}));
   }
 })();
 </script>
